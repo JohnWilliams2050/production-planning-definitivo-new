@@ -132,6 +132,21 @@ class AddJobState extends State<AddJobWidget> {
     return _sequenceDetails?.tasks;
   }
 
+  // Returns list of selected machine names for the matrix dialog
+  List<String> getMachineNames() {
+    final names = <String>{};
+    _selectedMachines.forEach((key, machine) {
+      if (machine != null && machine.name.isNotEmpty) {
+        names.add(machine.name);
+      }
+    });
+    return names.toList();
+  }
+
+  // Returns map of machine final states (machineTypeId -> state letter A-J)
+  Map<int, String> getMachineFinalStates() {
+    return Map<int, String>.from(_machineFinalStates);
+  }
 
   @override
   void initState() {

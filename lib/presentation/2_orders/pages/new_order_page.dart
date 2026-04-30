@@ -177,40 +177,34 @@ class NewOrderPage extends StatelessWidget {
     NewOrderState state,
     ColorScheme colorScheme,
   ) {
-    // ── derive the list of machines from bloc state ──────────────────────────
-    // NewOrdersState exposes the machines involved in the current order.
-    // Fall back to an empty list so the dialog can still open gracefully.
-    final List<String> machineNames =
-        state is NewOrdersState ? state.availableMachineNames : [];
+    if (state is! NewOrdersState) return;
 
-    // ── derive job states (product families) from current jobs ───────────────
-    // These are the "Estado dejado en la maquina" values across all jobs.
-    // They define the row/column labels of the matrix.
-    final List<String> jobStates = state is NewOrdersState
-        ? state.jobs
-            .map((j) => j.selectedMachineState)
-            .whereType<String>()
-            .toSet()
-            .toList()
-          ..sort()
-        : ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    // ── Collect machine names from each job's AddJobState ────────────────────
+    final machineNameSet = <String>{};
+    for (final job in state.jobs) {
+      machineNameSet.addAll(
+          job.stateKey.currentState?.getMachineNames() ?? []);
+    }
+    final machineNames = machineNameSet.isEmpty
+        ? ['(seleccione máquinas primero)']
+        : (machineNameSet.toList()..sort());
 
-    // If no job states are defined yet, use the default A-J set so the user
-    // can still pre-fill the matrix before all jobs are configured.
-    final labels = jobStates.isEmpty
+    // ── Collect job states (product-family letters A-J) from jobs ───────────
+    final stateSet = <String>{};
+    for (final job in state.jobs) {
+      stateSet.addAll(
+          (job.stateKey.currentState?.getMachineFinalStates() ?? {}).values);
+    }
+    final jobStates = stateSet.isEmpty
         ? ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
-        : jobStates;
+        : (stateSet.toList()..sort());
 
     showDialog(
       context: context,
       builder: (dialogContext) => _MatrixDialog(
-        machineNames: machineNames.isEmpty ? ['(sin máquinas)'] : machineNames,
-        states: labels,
-        // Pass any matrix that was already saved for the first machine so the
-        // user sees their previous values when re-opening the dialog.
-        initialMatrix: state is NewOrdersState
-            ? state.setupMatrices[machineNames.isNotEmpty ? machineNames.first : '']
-            : null,
+        machineNames: machineNames,
+        states: jobStates,
+        existingMatrices: state.setupMatrices,
         onSave: (machineName, matrix) {
           // Dispatch to BLoC → service → DAO → SQLite.
           BlocProvider.of<NewOrderBloc>(context)
@@ -266,16 +260,16 @@ class NewOrderPage extends StatelessWidget {
 class _MatrixDialog extends StatefulWidget {
   final List<String> machineNames;
   final List<String> states;
-  final SetupTimeMatrix? initialMatrix;
+  final Map<String, SetupTimeMatrix> existingMatrices;
   final void Function(String machineName, SetupTimeMatrix matrix) onSave;
   final ColorScheme colorScheme;
 
   const _MatrixDialog({
     required this.machineNames,
     required this.states,
+    required this.existingMatrices,
     required this.onSave,
     required this.colorScheme,
-    this.initialMatrix,
   });
 
   @override
@@ -300,13 +294,16 @@ class _MatrixDialogState extends State<_MatrixDialog> {
     // Pre-populate matrices map with any already-saved matrix.
     _matrices = {};
     for (final name in widget.machineNames) {
-      _matrices[name] = SetupTimeMatrix(
-        machineName: name,
-        states: widget.states,
-      );
-    }
-    if (widget.initialMatrix != null) {
-      _matrices[_selectedMachine] = widget.initialMatrix!;
+      final existing = widget.existingMatrices[name];
+      if (existing != null) {
+        // Deep-copy existing matrix to isolate local edits
+        _matrices[name] = _copyMatrix(existing);
+      } else {
+        _matrices[name] = SetupTimeMatrix(
+          machineName: name,
+          states: widget.states,
+        );
+      }
     }
 
     _buildControllers(_selectedMachine);
@@ -316,6 +313,20 @@ class _MatrixDialogState extends State<_MatrixDialog> {
   void dispose() {
     _disposeControllers();
     super.dispose();
+  }
+
+  // ── helper methods ───────────────────────────────────────────────────────
+
+  /// Copies a SetupTimeMatrix so local edits do not mutate the bloc's copy.
+  SetupTimeMatrix _copyMatrix(SetupTimeMatrix src) {
+    final copy = SetupTimeMatrix(
+        machineName: src.machineName, states: src.states.toList());
+    for (int r = 0; r < src.states.length; r++) {
+      for (int c = 0; c < src.states.length; c++) {
+        copy.setTimeByIndex(r, c, src.getTimeByIndex(r, c));
+      }
+    }
+    return copy;
   }
 
   // ── controller management ─────────────────────────────────────────────────
