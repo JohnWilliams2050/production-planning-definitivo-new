@@ -108,10 +108,29 @@ class SetupTimeHelper{
   SetupTimeHelper(this._matrix);
 
   //returns the setup time for a transition from state A to state B on the machine associated with the matrix
-  double getSetupTime(String fromState, String toState){
-    return _matrix.getTime(fromState, toState);
+  double getSetupTime(String? fromState, String toState){
+    return _matrix.getTime(fromState!, toState);
+  }
+  //calculates the start time of toState given the end time of fromState and the setup time between them
+  double startTime(double completionTimeOfFromJob, String fromJobState, String toJobState){
+    return completionTimeOfFromJob + getSetupTime(fromJobState, toJobState);
   }
 
-  //calculates the start time of toState given the end time of fromState and the setup time between them
+  //returns the effective processing time of [toJobState] given it follows [fromJobState], for algorithms that incorporate setup into processing.
+  double effectiveProcessingTime(double nominalProcessingTime, String fromJobState, toJobState){
+    return nominalProcessingTime + getSetupTime(fromJobState, toJobState);
+  }
+
+  //given an ordered sequence of [jobState] (the output of a scheduling algorithm)
+  //computes the total setup time for the whole sequence.
+  double totalSetupTime(List<String> jobStates){
+    if(jobStates.length < 2) return 0.0;
+    double total = 0.0;
+    total += getSetupTime(null, jobStates.first);
+    for (int i = 0; i < jobStates.length-1; i++) {
+      total += getSetupTime(jobStates[i], jobStates[i+1]);
+    }
+    return total;
+  }
   
 }
