@@ -1,6 +1,32 @@
-import 'dart:convert';
+// =============================================================================
+// lib/services/algorithms/setup_time_matrix.dart
+//
+// Core logic for sequence-dependent setup times (tiempos de alistamiento
+// dependientes de la secuencia).
+//
+// ARCHITECTURE NOTE
+// ──────────────────
+// This file is pure Dart — no Flutter, no BLoC, no SQLite imports.
+// It is consumed by:
+//   • Algorithm files (flexible_flow_shop.dart, single_machine.dart, …)
+//   • SetupTimeService, which hydrates the matrix from the DB via SetupTimeDao
+//
+// DB RELATIONSHIP
+// ───────────────
+// The setup_times table (via SetupTimeEntity / SetupTimeDao) stores one row
+// per (machineId, fromState, toState).  SetupTimeMatrixBuilder (at the bottom)
+// converts that flat list into a SetupTimeMatrix for O(1) in-algorithm lookup.
+//
+// WHY SEQUENCE-DEPENDENT?
+// ────────────────────────
+// s_{ij} = changeover cost from job-type i → job-type j on a given machine.
+// The cost changes based on what ran BEFORE (hence "dependent on the sequence").
+// This is precisely what the project leader's image flags:
+//   "Tiempos de alistamiento según job y máquina dependientes de la secuencia"
+// =============================================================================
 
-class SetupTimeMatrixEntry{
+/// One (fromState → toState) cell together with its setup cost in minutes.
+class SetupTimeMatrixEntry {
   final String fromState;
   final String toState;
   final double time;
@@ -12,125 +38,211 @@ class SetupTimeMatrixEntry{
   });
 
   @override
-  String toString() {
-    return 'SetupTimeMatrixEntry(fromState: $fromState, toState: $toState, time: $time)';
-  }
+  String toString() =>
+      'SetupTimeMatrixEntry(fromState: $fromState, toState: $toState, time: $time)';
 }
 
-class SetupTimeMatrix{
+// -----------------------------------------------------------------------------
+// Core matrix
+// -----------------------------------------------------------------------------
+
+/// Sequence-dependent setup time matrix for ONE machine.
+///
+/// Rows   = fromState (product family / job-type that just ran).
+/// Cols   = toState   (product family / job-type about to run).
+/// Value  = setup minutes required before processing can start.
+///
+/// The diagonal s_{ii} defaults to 0 (same product family → no changeover).
+class SetupTimeMatrix {
+  /// Machine identifier that matches the machine picker in the UI / DB.
   final String machineName;
+
+  /// Ordered state labels (e.g. "A"…"J" as shown in the UI screenshot).
   final List<String> states;
+
   final Map<String, Map<String, double>> _data = {};
 
   SetupTimeMatrix({
     required this.machineName,
     required List<String> states,
-  }) : states = List.unmodifiable(states){
+  }) : states = List.unmodifiable(states) {
     _initDefaultTimes();
   }
 
-  //Initialize the matrix with default times (0.0) for all state transitions
-  void _initDefaultTimes(){
-    for (var fromState in states) {
-      _data[fromState] = {};
-      for (var toState in states) {
-        _data[fromState]![toState] = 0.0;
-      }
-    }
-  }
-
-  //Set the setup time for a specific state transition
-  void setTime(String fromState, String toState, double time){
-    if(_data.containsKey(fromState) && _data[fromState]!.containsKey(toState)){
-      if(time < 0){
-        throw ArgumentError('Time cannot be negative: $time');
-      }
-      _data[fromState]![toState] = time;
-    } else {
-      throw ArgumentError('Invalid states: $fromState -> $toState');
-    }
-  }
-  //Same thing as above but accessed with indexes instead of state names
-  void setTimeByIndex(int rowIndex, int colIndex, double time){
-    setTime(states[rowIndex], states[colIndex], time);
-  }
-
-  //get the setup time for a specific state transition
-  double getTime(String fromState, String toState){
-    if(fromState == null) return 0.0;
-    if(_data.containsKey(fromState) && _data[fromState]!.containsKey(toState)){
-      return _data[fromState]?[toState] ?? 0.0;
-    } else {
-      throw ArgumentError('Invalid states: $fromState -> $toState');
-    }
-  }
-  //Same thing as above but accessed with indexes instead of state names
-  double getTimeByIndex(int rowIndex, int colIndex){
-    return getTime(states[rowIndex], states[colIndex]);
-  }
-  //Get a list of all non-zero entries in the matrix
-  List<SetupTimeMatrixEntry> get nonZeroEntries {
-    final result = <SetupTimeMatrixEntry>[];
+  void _initDefaultTimes() {
     for (final from in states) {
+      _data[from] = {};
       for (final to in states) {
-        final t = _data[from]![to]!;
-        if (t != 0.0) {
-          result.add(SetupTimeMatrixEntry(
-            fromState: from,
-            toState: to,
-            time: t,
-          ));
-        }
+        _data[from]![to] = 0.0;
       }
     }
-    return result;
   }
 
-  //get all entries in the matrix as a list of SetupTimeMatrixEntry
+  // ---- mutation -----------------------------------------------------------
+
+  void setTime(String fromState, String toState, double time) {
+    if (!_data.containsKey(fromState) ||
+        !_data[fromState]!.containsKey(toState)) {
+      throw ArgumentError('Invalid states: $fromState -> $toState');
+    }
+    if (time < 0) throw ArgumentError('Time cannot be negative: $time');
+    _data[fromState]![toState] = time;
+  }
+
+  void setTimeByIndex(int rowIndex, int colIndex, double time) =>
+      setTime(states[rowIndex], states[colIndex], time);
+
+  // ---- lookup -------------------------------------------------------------
+
+  /// Returns s_{fromState → toState}.
+  /// Returns 0.0 when [fromState] is null (cold-start / first job on machine).
+  /// Also returns 0.0 gracefully when a state pair is missing (e.g. new job
+  /// type added after the matrix was last saved).
+  double getTime(String? fromState, String toState) {
+    if (fromState == null) return 0.0;
+    return _data[fromState]?[toState] ?? 0.0;
+  }
+
+  double getTimeByIndex(int rowIndex, int colIndex) =>
+      getTime(states[rowIndex], states[colIndex]);
+
+  // ---- introspection ------------------------------------------------------
+
+  List<SetupTimeMatrixEntry> get nonZeroEntries => allEntries
+      .where((e) => e.time != 0.0)
+      .toList();
+
   List<SetupTimeMatrixEntry> get allEntries {
     final result = <SetupTimeMatrixEntry>[];
     for (final from in states) {
       for (final to in states) {
-        final t = _data[from]![to]!;
         result.add(SetupTimeMatrixEntry(
-          fromState: from,
-          toState: to,
-          time: t,
-        ));
+            fromState: from, toState: to, time: _data[from]![to]!));
       }
     }
     return result;
   }
+
+  List<List<double>> toMatrix() => [
+        for (final from in states)
+          [for (final to in states) _data[from]![to]!],
+      ];
 }
 
-class SetupTimeHelper{
+// -----------------------------------------------------------------------------
+// SetupTimeHelper — used directly inside algorithm files
+// -----------------------------------------------------------------------------
+
+/// Provides the two primitives every scheduling algorithm needs:
+///
+///   [getSetupTime]            → raw s_{ij} in minutes (double)
+///   [effectiveProcessingTime] → p_j + s_{ij}  (used by *_ADAPTADO variants)
+///   [setupDuration]           → s_{ij} as a [Duration] (used by flow-shops)
+///   [earliestStartAfterSetup] → completionTime + setup as a [DateTime]
+class SetupTimeHelper {
   final SetupTimeMatrix _matrix;
+
   SetupTimeHelper(this._matrix);
 
-  //returns the setup time for a transition from state A to state B on the machine associated with the matrix
-  double getSetupTime(String? fromState, String toState){
-    return _matrix.getTime(fromState!, toState);
-  }
-  //calculates the start time of toState given the end time of fromState and the setup time between them
-  double startTime(double completionTimeOfFromJob, String fromJobState, String toJobState){
-    return completionTimeOfFromJob + getSetupTime(fromJobState, toJobState);
-  }
+  /// Raw s_{fromState → toState} in minutes.  0.0 on cold start (null from).
+  double getSetupTime(String? fromState, String toState) =>
+      _matrix.getTime(fromState, toState);
 
-  //returns the effective processing time of [toJobState] given it follows [fromJobState], for algorithms that incorporate setup into processing.
-  double effectiveProcessingTime(double nominalProcessingTime, String fromJobState, toJobState){
-    return nominalProcessingTime + getSetupTime(fromJobState, toJobState);
-  }
+  /// p_j + s_{prev → curr}.  Used by EDD_ADAPTADO, SPT_ADAPTADO, etc.
+  double effectiveProcessingTime(
+    double nominalProcessingTime,
+    String? fromJobState,
+    String toJobState,
+  ) =>
+      nominalProcessingTime + getSetupTime(fromJobState, toJobState);
 
-  //given an ordered sequence of [jobState] (the output of a scheduling algorithm)
-  //computes the total setup time for the whole sequence.
-  double totalSetupTime(List<String> jobStates){
-    if(jobStates.length < 2) return 0.0;
-    double total = 0.0;
-    total += getSetupTime(null, jobStates.first);
-    for (int i = 0; i < jobStates.length-1; i++) {
-      total += getSetupTime(jobStates[i], jobStates[i+1]);
+  /// Total setup time in minutes for a complete ordered sequence of job states.
+  double totalSetupTime(List<String> jobStates) {
+    if (jobStates.length < 2) return 0.0;
+    double total = 0.0; // first job: cold start → s = 0
+    for (int i = 0; i < jobStates.length - 1; i++) {
+      total += getSetupTime(jobStates[i], jobStates[i + 1]);
     }
     return total;
   }
-  
+
+  /// s_{ij} expressed as a [Duration] for use with [DateTime] arithmetic.
+  Duration setupDuration(String? fromState, String toState) =>
+      Duration(minutes: getSetupTime(fromState, toState).round());
+
+  /// Returns the earliest [DateTime] at which a machine can START processing
+  /// the next job (toState), given it finished the previous job at
+  /// [completionTime].
+  ///
+  /// Working-schedule boundary adjustments (e.g. _adjustForWorkingSchedule)
+  /// are left to the caller because that logic already exists in the flow-shop
+  /// classes and must not be duplicated here.
+  DateTime earliestStartAfterSetup({
+    required DateTime completionTime,
+    required String? fromState,
+    required String toState,
+  }) =>
+      completionTime.add(setupDuration(fromState, toState));
+}
+
+// -----------------------------------------------------------------------------
+// SetupTimeMatrixBuilder — converts DB entities ↔ SetupTimeMatrix
+// -----------------------------------------------------------------------------
+
+/// Converts a flat list of DB entity maps into a [SetupTimeMatrix] and back.
+///
+/// The map schema matches SetupTimeEntity fields:
+///   'machineName' : String
+///   'fromState'   : String
+///   'toState'     : String
+///   'time'        : num  (minutes, stored as REAL in SQLite)
+///
+/// Example usage in SetupTimeService / repository:
+/// ```dart
+/// final entities = await _setupTimeDao.getByMachineId(machineId);
+/// final rows = entities.map((e) => {
+///   'machineName': machineName,
+///   'fromState'  : e.fromState,
+///   'toState'    : e.toState,
+///   'time'       : e.setupTime,
+/// }).toList();
+/// final matrix = SetupTimeMatrixBuilder.fromRows(
+///   machineName: machineName,
+///   states: jobStates,          // from the current production program
+///   rows: rows,
+/// );
+/// ```
+class SetupTimeMatrixBuilder {
+  /// Build a [SetupTimeMatrix] from DB rows.
+  ///
+  /// [states] must include every label that can appear as fromState or toState.
+  /// Rows whose states are not in [states] are silently skipped (safe fallback).
+  static SetupTimeMatrix fromRows({
+    required String machineName,
+    required List<String> states,
+    required List<Map<String, dynamic>> rows,
+  }) {
+    final matrix = SetupTimeMatrix(machineName: machineName, states: states);
+    for (final row in rows) {
+      final from = row['fromState'] as String;
+      final to = row['toState'] as String;
+      final t = (row['time'] as num).toDouble();
+      if (states.contains(from) && states.contains(to)) {
+        matrix.setTime(from, to, t);
+      }
+    }
+    return matrix;
+  }
+
+  /// Converts a [SetupTimeMatrix] to DB row maps for persistence.
+  /// Pass the result to SetupTimeDao.insertAll() or equivalent.
+  static List<Map<String, dynamic>> toRows(SetupTimeMatrix matrix) =>
+      matrix.allEntries
+          .map((e) => {
+                'machineName': matrix.machineName,
+                'fromState': e.fromState,
+                'toState': e.toState,
+                'time': e.time,
+              })
+          .toList();
 }
