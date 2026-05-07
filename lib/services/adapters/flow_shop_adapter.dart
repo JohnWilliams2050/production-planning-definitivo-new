@@ -8,6 +8,7 @@ import 'package:production_planning/repositories/interfaces/machine_repository.d
 import 'package:production_planning/repositories/interfaces/order_repository.dart';
 import 'package:production_planning/services/adapters/metrics.dart';
 import 'package:production_planning/services/algorithms/flow_shop.dart';
+import 'package:production_planning/services/setup_time_service.dart';
 import 'package:production_planning/shared/functions/functions.dart';
 import '../../entities/machine_entity.dart';
 import '../../shared/utils/task_time_utils.dart';
@@ -15,17 +16,18 @@ import '../../shared/utils/task_time_utils.dart';
 class FlowShopAdapter {
   final OrderRepository orderRepository;
   final MachineRepository machineRepository;
+  final SetupTimeService setupTimeService;
 
   FlowShopAdapter({
     required this.orderRepository,
     required this.machineRepository,
+    required this.setupTimeService,
   });
 
   Future<Tuple2<List<PlanningMachineEntity>, Metrics>?> flowShopAdapter(
     int orderId,
-    String rule, {
-    Map<int, Map<int?, Map<int, Duration>>>? changeoverMatrix,
-  }) async {
+    String rule,
+  ) async {
     final responseOrder = await orderRepository.getFullOrder(orderId);
     OrderEntity? order = responseOrder.fold((f) => null, (or) => or);
     if (order == null) return null;
@@ -43,14 +45,22 @@ class FlowShopAdapter {
       machines.addAll(machineList);
     }
 
-    final sequenceIds = order.orderJobs!
-        .where((job) => job.sequence != null && job.sequence!.id != null)
-        .map((job) => job.sequence!.id!)
+    // Collect job states for setup time matrices
+    final Set<String> jobStates = order.orderJobs!
+        .map((j) => j.jobState ?? 'A')
         .toSet();
 
-    final defaultMatrix = _buildDefaultChangeoverMatrix(machines, sequenceIds);
-    final mergedMatrix =
-        _mergeChangeoverMatrices(defaultMatrix, changeoverMatrix);
+    // Build setup helpers for machine types (since flow shop uses machineTypeId as machineId)
+    final Map<int, String> machineTypeIdsAndNames = {};
+    for (final machine in machines) {
+      if (machine.machineTypeId != null) {
+        machineTypeIdsAndNames.putIfAbsent(machine.machineTypeId!, () => machine.name);
+      }
+    }
+    final setupHelpers = await setupTimeService.buildHelpersForMachines(
+      machineIdsAndNames: machineTypeIdsAndNames,
+      jobStates: jobStates.toList()..sort(),
+    );
 
     //we create the input and expand jobs by their `amount` (cantidad)
     final List<FlowShopInput> inputJobs = [];
@@ -80,6 +90,7 @@ class FlowShopAdapter {
           job.availableDate,
           taskSequence,
           taskTimes,
+          jobState: job.jobState ?? 'A',
         ));
       }
     }
@@ -97,7 +108,7 @@ class FlowShopAdapter {
       inputJobs,
       machinesAvailability,
       rule,
-      changeoverMatrix: mergedMatrix,
+      setupHelpers: setupHelpers,
     ).output;
 
     //transform to planning machines
@@ -158,68 +169,5 @@ class FlowShopAdapter {
       jobsDates,
     );
     return Tuple2(planningMachines, metrics);
-  }
-
-  Map<int, Map<int?, Map<int, Duration>>> _buildDefaultChangeoverMatrix(
-    List<MachineEntity> machines,
-    Set<int> sequenceIds,
-  ) {
-    final Map<int, Map<int?, Map<int, Duration>>> matrix = {};
-    for (final machine in machines) {
-      if (machine.machineTypeId == null) continue;
-      final machineId = machine.machineTypeId!;
-      if (matrix.containsKey(machineId)) continue;
-      // Calculate preparation duration from percentage (100% = 1 hour base)
-      final Duration baseDuration =
-          Duration(minutes: (60 * machine.preparationPercentage / 100).round());
-      final Map<int, Duration> defaultTargets = {
-        for (final seqId in sequenceIds) seqId: baseDuration,
-      };
-      final Map<int?, Map<int, Duration>> machineMatrix = {
-        null: Map<int, Duration>.from(defaultTargets),
-      };
-      for (final previous in sequenceIds) {
-        machineMatrix[previous] = Map<int, Duration>.from(defaultTargets);
-      }
-      matrix[machineId] = machineMatrix;
-    }
-    return matrix;
-  }
-
-  Map<int, Map<int?, Map<int, Duration>>> _mergeChangeoverMatrices(
-    Map<int, Map<int?, Map<int, Duration>>> baseMatrix,
-    Map<int, Map<int?, Map<int, Duration>>>? overrideMatrix,
-  ) {
-    if (overrideMatrix == null || overrideMatrix.isEmpty) {
-      return baseMatrix;
-    }
-
-    final result = <int, Map<int?, Map<int, Duration>>>{};
-    final machineIds = <int>{...baseMatrix.keys, ...overrideMatrix.keys};
-    for (final machineId in machineIds) {
-      final baseMachine = baseMatrix[machineId] ?? {};
-      final overrideMachine = overrideMatrix[machineId] ?? {};
-      final previousIds = <int?>{...baseMachine.keys, ...overrideMachine.keys};
-      final mergedMachine = <int?, Map<int, Duration>>{};
-      for (final previousId in previousIds) {
-        final baseDurations = baseMachine[previousId] ?? {};
-        final overrideDurations = overrideMachine[previousId] ?? {};
-        final currentIds = <int>{
-          ...baseDurations.keys,
-          ...overrideDurations.keys
-        };
-        final mergedDurations = <int, Duration>{};
-        for (final currentId in currentIds) {
-          if (overrideDurations.containsKey(currentId)) {
-            mergedDurations[currentId] = overrideDurations[currentId]!;
-          } else if (baseDurations.containsKey(currentId)) {
-            mergedDurations[currentId] = baseDurations[currentId]!;
-          }
-        }
-        mergedMachine[previousId] = mergedDurations;
-      }
-      result[machineId] = mergedMachine;
-    }
-    return result;
   }
 }

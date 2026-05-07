@@ -240,7 +240,9 @@ class OrdersService {
           .parallelMachineAdapter(sch.value1, sch.value2)),
 
       'FLOW SHOP' => Right(await FlowShopAdapter(
-              machineRepository: machineRepo, orderRepository: orderRepo)
+              machineRepository: machineRepo, 
+              orderRepository: orderRepo,
+              setupTimeService: setupTimeService)
           .flowShopAdapter(sch.value1, sch.value2)),
 
       'FLEXIBLE FLOW SHOP' => Right(await FlexibleFlowShopAdapter(

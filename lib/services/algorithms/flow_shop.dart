@@ -1,5 +1,6 @@
 import 'package:dartz/dartz.dart';
 import 'package:flutter/material.dart';
+import 'package:production_planning/services/setup_time_matrix.dart';
 import 'package:production_planning/shared/types/rnage.dart';
 import 'dart:math';
 
@@ -14,6 +15,10 @@ class FlowShopInput {
   // in this map we have the durations, the id is the task id, and the duration is how long it takes
   final Map<int, Duration> taskTimesInMachines;
 
+  /// Product family / job type — used as the matrix row/column label.
+  /// Maps to "Estado dejado en la maquina" from the job creation form.
+  final String jobState;
+
   FlowShopInput(
     this.jobId,
     this.sequenceId,
@@ -21,8 +26,9 @@ class FlowShopInput {
     this.priority,
     this.availableDate,
     this.taskSequence,
-    this.taskTimesInMachines,
-  );
+    this.taskTimesInMachines, {
+    this.jobState = 'A', // default: first product family
+  });
 }
 
 class FlowShopOutput {
@@ -50,10 +56,13 @@ class FlowShop {
   Map<int, DateTime> machinesAvailability = {};
   List<FlowShopOutput> output = [];
 
-  /// changeoverMatrix:
-  /// { machineId : { previousSequenceId_or_null : { currentSequenceId : Duration } } }
-  final Map<int, Map<int?, Map<int, Duration>>> changeoverMatrix;
-  final Map<int, int?> _machineLastSequence = {};
+  // ── Setup-time additions ─────────────────────────────────────────────────
+  // One SetupTimeHelper per machineId.  Null means no setup for that machine.
+  final Map<int, SetupTimeHelper> setupHelpers;
+
+  // Tracks the jobState that each machine last processed so we know the
+  // "from" state for the next setup-time lookup.
+  final Map<int, String?> _lastJobStateOnMachine = {};
 
   FlowShop(
     this.startDate,
@@ -61,8 +70,8 @@ class FlowShop {
     this.inputJobs,
     this.machinesAvailability,
     String rule, {
-    Map<int, Map<int?, Map<int, Duration>>>? changeoverMatrix,
-  }) : changeoverMatrix = changeoverMatrix ?? {} {
+    Map<int, SetupTimeHelper>? setupHelpers, // <── new optional parameter
+  }) : setupHelpers = setupHelpers ?? {} {
     _initializeMachineLastSequence();
     switch (rule) {
       case "EDD":
@@ -122,14 +131,14 @@ class FlowShop {
   void _initializeMachineLastSequence() {
     for (final job in inputJobs) {
       for (final task in job.taskSequence) {
-        _machineLastSequence.putIfAbsent(task.value2, () => null);
+        _lastJobStateOnMachine.putIfAbsent(task.value2, () => null);
       }
     }
     for (final machineId in machinesAvailability.keys) {
-      _machineLastSequence.putIfAbsent(machineId, () => null);
+      _lastJobStateOnMachine.putIfAbsent(machineId, () => null);
     }
-    for (final machineId in changeoverMatrix.keys) {
-      _machineLastSequence.putIfAbsent(machineId, () => null);
+    for (final machineId in setupHelpers.keys) {
+      _lastJobStateOnMachine.putIfAbsent(machineId, () => null);
     }
   }
 
@@ -149,17 +158,17 @@ class FlowShop {
         return wsptB.compareTo(wsptA);
       });
 
-  void eddaRule() => dynamicRule((a, b) => a.dueDate.compareTo(b.dueDate));
-  void sptaRule() => dynamicRule(
-        (a, b) => _totalProcessingTime(a).compareTo(_totalProcessingTime(b)),
+  void eddaRule() => _dynamicSchedule((a, b) => a.dueDate.compareTo(b.dueDate));
+  void sptaRule() => _dynamicSchedule(
+        (a, b) => _effectiveTotalTime(a).compareTo(_effectiveTotalTime(b)),
       );
-  void lptaRule() => dynamicRule(
-        (a, b) => _totalProcessingTime(b).compareTo(_totalProcessingTime(a)),
+  void lptaRule() => _dynamicSchedule(
+        (a, b) => _effectiveTotalTime(b).compareTo(_effectiveTotalTime(a)),
       );
-  void fifoaRule() => dynamicRule((a, b) => a.availableDate.compareTo(b.availableDate));
-  void wsptaRule() => dynamicRule((a, b) {
-        double wsptA = a.priority / max(1, _totalProcessingTime(a));
-        double wsptB = b.priority / max(1, _totalProcessingTime(b));
+  void fifoaRule() => _dynamicSchedule((a, b) => a.availableDate.compareTo(b.availableDate));
+  void wsptaRule() => _dynamicSchedule((a, b) {
+        double wsptA = a.priority / max(1, _effectiveTotalTime(a));
+        double wsptB = b.priority / max(1, _effectiveTotalTime(b));
         return wsptB.compareTo(wsptA);
       });
 
@@ -243,7 +252,7 @@ class FlowShop {
     }
   }
 
-  void dynamicRule(int Function(FlowShopInput, FlowShopInput) comparator) {
+  void _dynamicSchedule(int Function(FlowShopInput, FlowShopInput) comparator) {
     List<FlowShopInput> remainingJobs = List.from(inputJobs);
     while (remainingJobs.isNotEmpty) {
       remainingJobs.sort(comparator);
@@ -267,15 +276,23 @@ class FlowShop {
       DateTime startTime = jobStartTime.isAfter(machineAvailable) ? jobStartTime : machineAvailable;
       startTime = _adjustForWorkingSchedule(startTime);
 
-      final int? previousSequence = _machineLastSequence.putIfAbsent(machineId, () => null);
-      final Duration setupDuration = _getSetupDuration(machineId, job.sequenceId, previousSequence);
-      final Duration totalDuration = duration + setupDuration;
+      // ── Apply sequence-dependent setup time ─────────────────────────────
+      // Look up s_{prevState → currentJobState} for this specific machine.
+      final helper = setupHelpers[machineId];
+      final String? prevState = _lastJobStateOnMachine[machineId];
+      final Duration setupDuration = helper != null
+          ? helper.setupDuration(prevState, job.jobState)
+          : Duration.zero;
 
-      DateTime endTime = _calculateEndWithSchedule(startTime, totalDuration);
+      // Setup occupies the machine before processing starts.
+      final DateTime processStart =
+          _adjustForWorkingSchedule(startTime.add(setupDuration));
 
-      scheduling[machineId] = Tuple2(taskId, Range(startTime, endTime));
+      DateTime endTime = _calculateEndWithSchedule(processStart, duration);
+
+      scheduling[machineId] = Tuple2(taskId, Range(processStart, endTime));
       machinesAvailability[machineId] = endTime;
-      _machineLastSequence[machineId] = job.sequenceId;
+      _lastJobStateOnMachine[machineId] = job.jobState; // remember for next job
       jobStartTime = endTime;
     }
 
@@ -290,25 +307,28 @@ class FlowShop {
     );
   }
 
-  Duration _getSetupDuration(int machineId, int currentSequenceId, int? previousSequenceId) {
-    final machineMatrix = changeoverMatrix[machineId];
-    if (machineMatrix == null) return Duration.zero;
-
-    final previousDurations = machineMatrix[previousSequenceId];
-    if (previousDurations != null && previousDurations.containsKey(currentSequenceId)) {
-      return previousDurations[currentSequenceId]!;
-    }
-
-    final defaultDurations = machineMatrix[null];
-    if (defaultDurations != null && defaultDurations.containsKey(currentSequenceId)) {
-      return defaultDurations[currentSequenceId]!;
-    }
-
-    return Duration.zero;
-  }
-
   int _totalProcessingTime(FlowShopInput job) {
     return job.taskTimesInMachines.values.fold(0, (sum, duration) => sum + duration.inMinutes);
+  }
+
+  /// Effective total processing time: sum of (p_j + s_{prev→j}) across all
+  /// machines, using the CURRENT last-state of each machine.
+  ///
+  /// This is the key difference from the non-ADAPTADO variants: the sort order
+  /// can change mid-schedule as setups accumulate, which is exactly the
+  /// "adapted" behaviour described in the scheduling literature.
+  double _effectiveTotalTime(FlowShopInput job) {
+    double total = 0.0;
+    for (final task in job.taskSequence) {
+      final int machineId = task.value2;
+      final double nominal = job.taskTimesInMachines[task.value1]!.inMinutes.toDouble();
+      final helper = setupHelpers[machineId];
+      final double setup = helper != null
+          ? helper.getSetupTime(_lastJobStateOnMachine[machineId], job.jobState)
+          : 0.0;
+      total += nominal + setup;
+    }
+    return total;
   }
 
   DateTime _adjustForWorkingSchedule(DateTime start) {
@@ -475,13 +495,13 @@ class FlowShop {
 
   int _calculateMakespan(List<FlowShopInput> jobSequence) {
     Map<int, DateTime> currentMachineAvailability = {};
-    Map<int, int?> currentMachineSequence = {};
+    Map<int, String?> currentMachineState = {};
 
     for (var job in jobSequence) {
       for (var task in job.taskSequence) {
         int machineId = task.value2;
         currentMachineAvailability[machineId] = startDate;
-        currentMachineSequence[machineId] = null;
+        currentMachineState[machineId] = null;
       }
     }
 
@@ -499,14 +519,21 @@ class FlowShop {
         DateTime startTime = jobStartTime.isAfter(machineAvailable) ? jobStartTime : machineAvailable;
         startTime = _adjustForWorkingSchedule(startTime);
 
-        final int? previousSequence = currentMachineSequence.putIfAbsent(machineId, () => null);
-        final Duration setupDuration = _getSetupDuration(machineId, job.sequenceId, previousSequence);
-        final Duration totalDuration = duration + setupDuration;
+        // Apply sequence-dependent setup time
+        final helper = setupHelpers[machineId];
+        final String? prevState = currentMachineState[machineId];
+        final Duration setupDuration = helper != null
+            ? helper.setupDuration(prevState, job.jobState)
+            : Duration.zero;
 
-        DateTime endTime = _calculateEndWithSchedule(startTime, totalDuration);
+        // Setup occupies the machine before processing starts.
+        final DateTime processStart =
+            _adjustForWorkingSchedule(startTime.add(setupDuration));
+
+        DateTime endTime = _calculateEndWithSchedule(processStart, duration);
 
         currentMachineAvailability[machineId] = endTime;
-        currentMachineSequence[machineId] = job.sequenceId;
+        currentMachineState[machineId] = job.jobState;
         jobStartTime = endTime;
       }
 
@@ -567,13 +594,13 @@ class FlowShop {
 
   int _evaluateFitnessFlowShop(List<FlowShopInput> jobSequence) {
     Map<int, DateTime> machineAvailability = {};
-    Map<int, int?> machineSequence = {};
+    Map<int, String?> machineState = {};
 
     for (var job in jobSequence) {
       for (var task in job.taskSequence) {
         int machineId = task.value2;
         machineAvailability[machineId] = startDate;
-        machineSequence[machineId] = null;
+        machineState[machineId] = null;
       }
     }
 
@@ -591,14 +618,21 @@ class FlowShop {
         DateTime startTime = jobStartTime.isAfter(machineAvailable) ? jobStartTime : machineAvailable;
         startTime = _adjustForWorkingSchedule(startTime);
 
-        final int? previousSequence = machineSequence.putIfAbsent(machineId, () => null);
-        final Duration setupDuration = _getSetupDuration(machineId, job.sequenceId, previousSequence);
-        final Duration totalDuration = duration + setupDuration;
+        // Apply sequence-dependent setup time
+        final helper = setupHelpers[machineId];
+        final String? prevState = machineState[machineId];
+        final Duration setupDuration = helper != null
+            ? helper.setupDuration(prevState, job.jobState)
+            : Duration.zero;
 
-        DateTime endTime = _calculateEndWithSchedule(startTime, totalDuration);
+        // Setup occupies the machine before processing starts.
+        final DateTime processStart =
+            _adjustForWorkingSchedule(startTime.add(setupDuration));
+
+        DateTime endTime = _calculateEndWithSchedule(processStart, duration);
 
         machineAvailability[machineId] = endTime;
-        machineSequence[machineId] = job.sequenceId;
+        machineState[machineId] = job.jobState;
         jobStartTime = endTime;
       }
 
