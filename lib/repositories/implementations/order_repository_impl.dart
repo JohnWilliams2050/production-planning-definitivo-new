@@ -89,7 +89,8 @@ class OrderRepositoryImpl implements OrderRepository {
               model.priority,
               model.availableDate,
               preemptionMatrix: model.preemptionMatrix,
-              taskMachineTimes: taskTimes);
+              taskMachineTimes: taskTimes,
+              jobState: model.jobState);
 
           jobsEntities.add(jobEntity);
         }
@@ -187,7 +188,8 @@ class OrderRepositoryImpl implements OrderRepository {
             model.priority,
             model.availableDate,
             preemptionMatrix: model.preemptionMatrix,
-            taskMachineTimes: machineTimesMap);
+            taskMachineTimes: machineTimesMap,
+            jobState: model.jobState);
 
         jobsEntities.add(jobEntity);
       }

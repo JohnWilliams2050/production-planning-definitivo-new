@@ -57,6 +57,7 @@ class OrdersService {
         jobModel.availableDate,
         preemptionMatrix: jobModel.preemptionMatrix,
         taskMachineTimes: taskMachineTimes,
+        jobState: jobModel.jobState,
       );
     }).toList();
 
@@ -229,7 +230,9 @@ class OrdersService {
       scheduleOrder(Tuple3<int, String, String> sch) async {
     return switch (sch.value3) {
       'SINGLE MACHINE' => Right(await SingleMachineAdapter(
-              orderRepository: orderRepo, machineRepository: machineRepo)
+              orderRepository: orderRepo, 
+              machineRepository: machineRepo,
+              setupTimeService: setupTimeService)
           .singleMachineAdapter(sch.value1, sch.value2)),
 
       'PARALLEL MACHINES' => Right(await ParallelMachineAdapter(

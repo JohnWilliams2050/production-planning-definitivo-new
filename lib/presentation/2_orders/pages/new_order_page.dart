@@ -1,13 +1,12 @@
-// =============================================================================
 // lib/presentation/2_orders/pages/new_order_page.dart
 //
-// Changes from the previous static version:
-//   1. The matrix dialog is now driven by SetupTimeMatrix / SetupTimeHelper.
-//   2. Machine list comes from NewOrderBloc (already has machine data).
-//   3. Cells are backed by TextEditingControllers that read/write the matrix.
-//   4. On "Cerrar" the filled matrix is dispatched back to the BLoC so it can
-//      be persisted via SetupTimeDao before running an algorithm.
-// =============================================================================
+// Changes from previous version:
+//   1. _MatrixDialog now has a "Guardar" button that calls onSave AND shows
+//      a SnackBar so the user knows the matrix was persisted.
+//   2. "Cerrar" no longer saves — it just dismisses (data is already saved
+//      by Guardar or will be lost intentionally, matching LEKIN's behaviour).
+//   3. "Resetear" zeros the current machine's matrix in-place.
+//   4. All other logic is identical.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -80,7 +79,6 @@ class NewOrderPage extends StatelessWidget {
               return Center(
                 child: Column(
                   children: [
-                    // ── info button ─────────────────────────────────────────
                     Row(
                       children: [
                         IconButton(
@@ -102,13 +100,11 @@ class NewOrderPage extends StatelessWidget {
                         ),
                       ],
                     ),
-                    // ── job list ─────────────────────────────────────────────
                     Expanded(
                       child: SingleChildScrollView(
                         child: Column(children: jobWidgets),
                       ),
                     ),
-                    // ── action buttons ───────────────────────────────────────
                     ElevatedButton(
                       onPressed: () => bloc.addJob(),
                       style: ElevatedButton.styleFrom(
@@ -167,11 +163,6 @@ class NewOrderPage extends StatelessWidget {
   // Matrix dialog
   // ---------------------------------------------------------------------------
 
-  /// Opens the "Matriz de tiempos de alistamiento" dialog.
-  ///
-  /// The dialog is stateful so cell edits persist while it is open.
-  /// On "Cerrar" the completed matrix is dispatched to [NewOrderBloc] via
-  /// [NewOrderBloc.saveSetupMatrix], which persists it through SetupTimeDao.
   void _showMatrixDialog(
     BuildContext context,
     NewOrderState state,
@@ -179,7 +170,7 @@ class NewOrderPage extends StatelessWidget {
   ) {
     if (state is! NewOrdersState) return;
 
-    // ── Collect machine names from each job's AddJobState ────────────────────
+    // Collect machine names from each job's AddJobState.
     final machineNameSet = <String>{};
     for (final job in state.jobs) {
       machineNameSet.addAll(
@@ -189,7 +180,7 @@ class NewOrderPage extends StatelessWidget {
         ? ['(seleccione máquinas primero)']
         : (machineNameSet.toList()..sort());
 
-    // ── Collect job states (product-family letters A-J) from jobs ───────────
+    // Collect job states (A-J letters) from each job's _machineFinalStates.
     final stateSet = <String>{};
     for (final job in state.jobs) {
       stateSet.addAll(
@@ -205,9 +196,10 @@ class NewOrderPage extends StatelessWidget {
         machineNames: machineNames,
         states: jobStates,
         existingMatrices: state.setupMatrices,
-        onSave: (machineName, matrix) {
-          // Dispatch to BLoC → service → DAO → SQLite.
-          BlocProvider.of<NewOrderBloc>(context)
+        // onSave is called from INSIDE the dialog when the user taps Guardar.
+        // We capture the outer BuildContext so the BLoC is reachable.
+        onSave: (machineName, matrix) async {
+          await BlocProvider.of<NewOrderBloc>(context)
               .saveSetupMatrix(machineName, matrix);
         },
         colorScheme: colorScheme,
@@ -216,7 +208,7 @@ class NewOrderPage extends StatelessWidget {
   }
 
   // ---------------------------------------------------------------------------
-  // Validation helpers (unchanged)
+  // Validation (unchanged)
   // ---------------------------------------------------------------------------
 
   bool _validateForm(NewOrderState state) {
@@ -254,14 +246,18 @@ class NewOrderPage extends StatelessWidget {
 }
 
 // =============================================================================
-// _MatrixDialog — stateful widget that owns the matrix editing UI
+// _MatrixDialog
 // =============================================================================
 
 class _MatrixDialog extends StatefulWidget {
   final List<String> machineNames;
   final List<String> states;
   final Map<String, SetupTimeMatrix> existingMatrices;
-  final void Function(String machineName, SetupTimeMatrix matrix) onSave;
+
+  /// Called when the user taps "Guardar".  Async so the BLoC await can finish
+  /// before we show the confirmation SnackBar.
+  final Future<void> Function(String machineName, SetupTimeMatrix matrix)
+      onSave;
   final ColorScheme colorScheme;
 
   const _MatrixDialog({
@@ -278,31 +274,29 @@ class _MatrixDialog extends StatefulWidget {
 
 class _MatrixDialogState extends State<_MatrixDialog> {
   late String _selectedMachine;
-
-  /// One matrix per machine — keeps edits alive when the user switches machines.
   late final Map<String, SetupTimeMatrix> _matrices;
-
-  /// TextEditingControllers for every cell of the CURRENTLY visible matrix.
-  /// Rebuilt whenever [_selectedMachine] changes.
   late List<List<TextEditingController>> _controllers;
+
+  /// Tracks which machines have been saved in this session so we can show
+  /// a visual indicator (green check icon) next to the machine name.
+  final Set<String> _savedMachines = {};
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
     _selectedMachine = widget.machineNames.first;
 
-    // Pre-populate matrices map with any already-saved matrix.
     _matrices = {};
     for (final name in widget.machineNames) {
       final existing = widget.existingMatrices[name];
       if (existing != null) {
-        // Deep-copy existing matrix to isolate local edits
         _matrices[name] = _copyMatrix(existing);
+        // If it was already saved before this dialog opened, mark it.
+        _savedMachines.add(name);
       } else {
-        _matrices[name] = SetupTimeMatrix(
-          machineName: name,
-          states: widget.states,
-        );
+        _matrices[name] =
+            SetupTimeMatrix(machineName: name, states: widget.states);
       }
     }
 
@@ -315,12 +309,11 @@ class _MatrixDialogState extends State<_MatrixDialog> {
     super.dispose();
   }
 
-  // ── helper methods ───────────────────────────────────────────────────────
+  // ── helpers ───────────────────────────────────────────────────────────────
 
-  /// Copies a SetupTimeMatrix so local edits do not mutate the bloc's copy.
   SetupTimeMatrix _copyMatrix(SetupTimeMatrix src) {
-    final copy = SetupTimeMatrix(
-        machineName: src.machineName, states: src.states.toList());
+    final copy =
+        SetupTimeMatrix(machineName: src.machineName, states: src.states.toList());
     for (int r = 0; r < src.states.length; r++) {
       for (int c = 0; c < src.states.length; c++) {
         copy.setTimeByIndex(r, c, src.getTimeByIndex(r, c));
@@ -329,49 +322,68 @@ class _MatrixDialogState extends State<_MatrixDialog> {
     return copy;
   }
 
-  // ── controller management ─────────────────────────────────────────────────
-
-  void _buildControllers(String machineName) {
-    final matrix = _matrices[machineName]!;
+  void _buildControllers(String machine) {
+    final matrix = _matrices[machine]!;
     _controllers = List.generate(
       widget.states.length,
       (r) => List.generate(widget.states.length, (c) {
         final val = matrix.getTimeByIndex(r, c);
         return TextEditingController(
-          text: val == 0.0 ? '' : val.toStringAsFixed(1),
-        );
+            text: val == 0.0 ? '' : val.toStringAsFixed(1));
       }),
     );
   }
 
   void _disposeControllers() {
     for (final row in _controllers) {
-      for (final ctrl in row) {
-        ctrl.dispose();
-      }
+      for (final ctrl in row) ctrl.dispose();
     }
   }
 
-  /// Flushes the current controller values into the matrix model.
-  void _flushControllers() {
+  /// Writes current TextFields into the model without switching machines.
+  void _flushToModel() {
     final matrix = _matrices[_selectedMachine]!;
     for (int r = 0; r < widget.states.length; r++) {
       for (int c = 0; c < widget.states.length; c++) {
         final raw = _controllers[r][c].text.trim();
-        final parsed = double.tryParse(raw) ?? 0.0;
-        final safeVal = parsed < 0 ? 0.0 : parsed;
-        matrix.setTimeByIndex(r, c, safeVal);
+        final val = (double.tryParse(raw) ?? 0.0).clamp(0.0, double.infinity);
+        matrix.setTimeByIndex(r, c, val);
       }
     }
   }
 
-  void _switchMachine(String newMachine) {
-    _flushControllers(); // save edits for the old machine
+  void _switchMachine(String name) {
+    _flushToModel(); // persist edits for the outgoing machine
     _disposeControllers();
     setState(() {
-      _selectedMachine = newMachine;
-      _buildControllers(newMachine);
+      _selectedMachine = name;
+      _buildControllers(name);
     });
+  }
+
+  // ── save ─────────────────────────────────────────────────────────────────
+
+  Future<void> _saveCurrentMachine() async {
+    _flushToModel();
+    setState(() => _isSaving = true);
+
+    await widget.onSave(_selectedMachine, _matrices[_selectedMachine]!);
+
+    if (!mounted) return;
+    setState(() {
+      _savedMachines.add(_selectedMachine);
+      _isSaving = false;
+    });
+
+    // Show confirmation inside the dialog via SnackBar on the root scaffold.
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+            'Matriz guardada para "$_selectedMachine"'),
+        backgroundColor: Colors.green.shade700,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   // ── build ─────────────────────────────────────────────────────────────────
@@ -382,39 +394,49 @@ class _MatrixDialogState extends State<_MatrixDialog> {
       title: const Text("Matriz de tiempos de alistamiento"),
       content: SizedBox(
         width: double.maxFinite,
-        height: 420,
+        height: 460,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── machine selector ────────────────────────────────────────────
+            // ── machine selector with saved indicator ──────────────────────
             DropdownButtonFormField<String>(
               value: _selectedMachine,
               decoration: const InputDecoration(labelText: 'Máquina'),
-              items: widget.machineNames
-                  .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                  .toList(),
-              onChanged: (value) {
-                if (value != null) _switchMachine(value);
+              items: widget.machineNames.map((m) {
+                final isSaved = _savedMachines.contains(m);
+                return DropdownMenuItem(
+                  value: m,
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(m)),
+                      if (isSaved)
+                        const Icon(Icons.check_circle,
+                            color: Colors.green, size: 18),
+                    ],
+                  ),
+                );
+              }).toList(),
+              onChanged: (v) {
+                if (v != null) _switchMachine(v);
               },
             ),
-            const SizedBox(height: 12),
-            // ── explanation text ────────────────────────────────────────────
+            const SizedBox(height: 8),
             Text(
-              'Ingrese el tiempo de alistamiento (en minutos) al pasar '
-              'del tipo de job de la FILA al tipo de job de la COLUMNA.',
+              'Tiempo en minutos para cambiar del tipo de la FILA '
+              'al tipo de la COLUMNA. Diagonal = 0 (mismo tipo).',
               style: Theme.of(context)
                   .textTheme
                   .bodySmall
                   ?.copyWith(color: Colors.grey[600]),
             ),
             const SizedBox(height: 8),
-            // ── scrollable grid ─────────────────────────────────────────────
+            // ── scrollable grid ────────────────────────────────────────────
             Expanded(
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: SingleChildScrollView(
                   scrollDirection: Axis.vertical,
-                  child: _buildDataTable(),
+                  child: _buildTable(),
                 ),
               ),
             ),
@@ -422,39 +444,49 @@ class _MatrixDialogState extends State<_MatrixDialog> {
         ),
       ),
       actions: [
-        // Reset button — zeros all cells for the current machine.
+        // Resetear — zeros the currently visible machine's matrix.
         TextButton(
           onPressed: () {
             setState(() {
               for (final row in _controllers) {
-                for (final ctrl in row) {
-                  ctrl.text = '';
-                }
+                for (final ctrl in row) ctrl.text = '';
               }
               _matrices[_selectedMachine] = SetupTimeMatrix(
-                machineName: _selectedMachine,
-                states: widget.states,
-              );
+                  machineName: _selectedMachine, states: widget.states);
+              // Remove saved mark since the matrix was reset.
+              _savedMachines.remove(_selectedMachine);
             });
           },
           child: const Text("Resetear"),
         ),
+
+        // Guardar — persists the current machine's matrix to BLoC/DB.
+        ElevatedButton.icon(
+          onPressed: _isSaving ? null : _saveCurrentMachine,
+          icon: _isSaving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.save, size: 18),
+          label: const Text("Guardar"),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: widget.colorScheme.primary,
+            foregroundColor: widget.colorScheme.onPrimary,
+          ),
+        ),
+
+        // Cerrar — dismisses without saving (user should Guardar first).
         TextButton(
-          onPressed: () {
-            // Flush current edits into the model, then persist each matrix.
-            _flushControllers();
-            for (final entry in _matrices.entries) {
-              widget.onSave(entry.key, entry.value);
-            }
-            Navigator.of(context).pop();
-          },
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text("Cerrar"),
         ),
       ],
     );
   }
 
-  DataTable _buildDataTable() {
+  DataTable _buildTable() {
     return DataTable(
       columnSpacing: 8,
       headingRowHeight: 36,
@@ -477,7 +509,6 @@ class _MatrixDialogState extends State<_MatrixDialog> {
       ],
       rows: List.generate(widget.states.length, (r) {
         return DataRow(cells: [
-          // Row header
           DataCell(
             SizedBox(
               width: 24,
@@ -488,7 +519,6 @@ class _MatrixDialogState extends State<_MatrixDialog> {
               ),
             ),
           ),
-          // One cell per column
           ...List.generate(widget.states.length, (c) {
             final isDiagonal = r == c;
             return DataCell(
@@ -496,7 +526,6 @@ class _MatrixDialogState extends State<_MatrixDialog> {
                 width: 52,
                 child: TextField(
                   controller: _controllers[r][c],
-                  // Diagonal cells are typically 0 but still editable.
                   enabled: !isDiagonal,
                   keyboardType:
                       const TextInputType.numberWithOptions(decimal: true),
@@ -510,8 +539,7 @@ class _MatrixDialogState extends State<_MatrixDialog> {
                     border: const OutlineInputBorder(),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                     filled: isDiagonal,
-                    fillColor:
-                        isDiagonal ? Colors.grey.shade200 : null,
+                    fillColor: isDiagonal ? Colors.grey.shade200 : null,
                   ),
                 ),
               ),

@@ -9,6 +9,7 @@ class JobModel {
   final DateTime dueDate;
   final DateTime availableDate;
   final int priority;
+  final String? jobState;
 
   final Map<int, int>? preemptionMatrix;
   // Map<taskId, Map<machineId, Map<'processing'|'preparation'|'rest', minutes>>>
@@ -16,7 +17,7 @@ class JobModel {
 
   JobModel(this.jobId, this.sequenceId, this.amount, this.jobName, this.dueDate,
       this.priority, this.availableDate,
-      {this.preemptionMatrix, this.taskMachineTimesMinutes});
+      {this.preemptionMatrix, this.taskMachineTimesMinutes, this.jobState});
 
   factory JobModel.fromJson(Map<String, dynamic> json) {
     return JobModel(
@@ -26,7 +27,8 @@ class JobModel {
         json['job_name'],
         DateTime.parse(json['due_date']),
         json['priority'],
-        DateTime.parse(json['available_date']));
+        DateTime.parse(json['available_date']),
+        jobState: json['job_state'] as String?);
   }
   JobEntity toEntity() {
     // convert minutes map to MachineTimes map
@@ -49,7 +51,7 @@ class JobModel {
     // to MachineTimes is handled later in repository implementation where
     // sequence/tasks are available.
     return JobEntity(jobId, null, amount, jobName, dueDate, priority, availableDate,
-        preemptionMatrix: preemptionMatrix, taskMachineTimes: null);
+        preemptionMatrix: preemptionMatrix, taskMachineTimes: null, jobState: jobState);
 
   }
 }

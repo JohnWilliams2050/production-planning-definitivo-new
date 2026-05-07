@@ -36,7 +36,7 @@ class SQLLiteDatabaseProvider {
 
     _database = await openDatabase(
       path,
-      version: 9,
+      version: 10,
       onCreate: (Database db, int version) async {
         final batch = db.batch();
 
@@ -175,6 +175,7 @@ class SQLLiteDatabaseProvider {
               due_date DATE NOT NULL,
               available_date DATE NOT NULL,
               priority INTEGER NOT NULL,
+              job_state VARCHAR(1) NOT NULL DEFAULT 'A',
               FOREIGN KEY (sequence_id) REFERENCES sequences(sequence_id),
               FOREIGN KEY (order_id) REFERENCES orders(order_id)
           );
@@ -730,6 +731,9 @@ class SQLLiteDatabaseProvider {
         }
         if (oldVersion < 9) {
           await db.execute('ALTER TABLE jobs ADD COLUMN job_name VARCHAR(100);');
+        }
+        if (oldVersion < 10) {
+          await db.execute('ALTER TABLE jobs ADD COLUMN job_state VARCHAR(1) NOT NULL DEFAULT \"A\";');
         }
       },
     );

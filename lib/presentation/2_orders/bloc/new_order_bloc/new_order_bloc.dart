@@ -227,7 +227,7 @@ class NewOrderBloc extends Cubit<NewOrderState> {
           wid.idController!.text.isNotEmpty ? wid.idController!.text : null,
           preemptionMatrix: wid.stateKey.currentState?.getPreemptionMatrix(),
           taskMachineTimesMinutes: taskMachineTimes,
-
+          jobState: wid.stateKey.currentState?.getJobState(),
         );
       }).toList();
 

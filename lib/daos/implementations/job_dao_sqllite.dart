@@ -75,6 +75,7 @@ class JobDaoSQLlite implements JobDao {
         DateTime.parse(map['available_date'] as String),
         preemptionMatrix: preemptionMatrix,
         taskMachineTimesMinutes: taskMachineTimes,
+        jobState: map['job_state'] as String?,
       ));
     }
 
@@ -93,6 +94,7 @@ class JobDaoSQLlite implements JobDao {
         'due_date': job.dueDate.toIso8601String(), // due date
         'priority': job.priority,
         'available_date': job.availableDate.toIso8601String(),
+        'job_state': job.jobState ?? 'A',
       };
 
       // insert job to data base
