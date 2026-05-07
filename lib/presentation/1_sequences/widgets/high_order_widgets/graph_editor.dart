@@ -154,22 +154,26 @@ class NodeEditorState extends State<NodeEditor> {
     setState(() {
       _nodePos.clear();
       _machineById.clear();
-      _connections
-        ..clear()
-        ..addAll(connections);
 
       // Layout inicial simple en grilla:
       final cols = math.max(1, (machines.length / 3.0).ceil());
       const dx = 220.0, dy = 140.0;
       int i = 0;
+      final validNodeIds = <int>{};
       for (final m in machines) {
         final id = _extractId(m);
+        validNodeIds.add(id);
         _machineById[id] = m;
         final col = i % cols;
         final row = (i / cols).floor();
         _nodePos[id] = Offset(120 + col * dx, 120 + row * dy);
         i++;
       }
+
+      _connections
+        ..clear()
+        ..addAll(connections.where((e) =>
+            validNodeIds.contains(e.source) && validNodeIds.contains(e.target)));
 
       _clearTransient();
     });
@@ -467,6 +471,8 @@ class NodeEditorState extends State<NodeEditor> {
     return null;
   }
 
+  bool _hasNode(int id) => _nodePos.containsKey(id) && _machineById.containsKey(id);
+
   /// Rectángulo de un nodo por id.
   Rect _nodeRect(int id) {
     final pos = _nodePos[id]!;
@@ -617,6 +623,7 @@ class NodeEditorState extends State<NodeEditor> {
     const threshold = 8.0; // tolerancia de clic sobre línea
     for (var i = 0; i < _connections.length; i++) {
       final e = _connections[i];
+      if (!_hasNode(e.source) || !_hasNode(e.target)) continue;
       final a = _nodeCenter(e.source);
       final b = _nodeCenter(e.target);
       // Anclar a los bordes exactos del rectángulo del nodo
@@ -698,6 +705,7 @@ class NodeEditorState extends State<NodeEditor> {
   /// Coordenadas de los handles (círculos) en los extremos de una arista seleccionada.
   (Offset, Offset) _edgeHandles(int edgeIndex) {
     final e = _connections[edgeIndex];
+    if (!_hasNode(e.source) || !_hasNode(e.target)) return (Offset.zero, Offset.zero);
     final a = _nodeCenter(e.source);
     final b = _nodeCenter(e.target);
     final from = _shrinkToRectEdge(a, b, _nodeRect(e.source));
@@ -741,7 +749,6 @@ class NodeEditorState extends State<NodeEditor> {
     }
     return 'Nodo ${m.id}';
   }
-
 
   /// SnackBar corto de advertencia (e.g., intento de crear ciclo).
   void _flashWarn(BuildContext context, String msg) {
@@ -802,6 +809,10 @@ class _GraphPainter extends CustomPainter {
       }
 
       final e = connections[i];
+      if (!_hasNode(e.source) || !_hasNode(e.target)) {
+        continue; // omite conexiones inválidas que referencian nodos ausentes
+      }
+
       final fromRect = _nodeRect(e.source);
       final toRect = _nodeRect(e.target);
 
@@ -876,7 +887,9 @@ class _GraphPainter extends CustomPainter {
       canvas.drawRRect(rrect, fill);
       canvas.drawRRect(rrect, stroke);
 
-      final label = _extractLabel(machineById[id]!);
+      final label = machineById[id] != null
+          ? _extractLabel(machineById[id]!)
+          : _fallbackLabel(id);
       final tp = TextPainter(
         text: TextSpan(
           text: label,
@@ -915,9 +928,12 @@ class _GraphPainter extends CustomPainter {
 
   /// Rect de un nodo por id (según estado actual).
   Rect _nodeRect(int id) {
-    final pos = nodePos[id]!;
+    final pos = nodePos[id];
+    if (pos == null) return Rect.zero;
     return Rect.fromLTWH(pos.dx, pos.dy, nodeSize.width, nodeSize.height);
   }
+
+  bool _hasNode(int id) => nodePos.containsKey(id) && machineById.containsKey(id);
 
   /// Centro geométrico de un rect.
   Offset _center(Rect r) => Offset(r.left + r.width / 2, r.top + r.height / 2);
@@ -1021,6 +1037,9 @@ class _GraphPainter extends CustomPainter {
     } catch (_) {}
     return 'Nodo ${m.id}';
   }
+
+  /// Texto de fallback cuando la entidad de máquina falta en el grafo.
+  String _fallbackLabel(int id) => 'Nodo $id';
 
   @override
   bool shouldRepaint(covariant _GraphPainter old) {
